@@ -291,37 +291,38 @@ async def client_listener(server_url):
     
     print(f"Connecting to Render Cloud Broker at {server_url}...")
     
-    async for ws in websockets.connect(server_url):
-        print("Connected to server successfully. Standby for commands...")
-        with websocket_lock:
-            websocket_client = ws
-            
+    while True:
         try:
-            async for raw_msg in ws:
-                msg = json.loads(raw_msg)
-                
-                # Check for start/stop commands from backend server
-                if "command" in msg:
-                    cmd = msg["command"]
-                    if cmd == "start":
-                        target_qr = msg["target_qr"]
-                        mock_mode = msg["mock_mode"]
-                        print(f"Received START command. Target: {target_qr}, Mock: {mock_mode}")
-                        
-                        with runner_lock:
-                            if active_runner is not None and active_runner.thread and active_runner.thread.is_alive():
-                                print("Warning: A mission is already running locally.")
-                                continue
-                            active_runner = LocalMissionRunner(target_qr, mock_mode)
-                            active_runner.start()
+            async with websockets.connect(server_url) as ws:
+                print("Connected to server successfully. Standby for commands...")
+                with websocket_lock:
+                    websocket_client = ws
+                    
+                async for raw_msg in ws:
+                    msg = json.loads(raw_msg)
+                    
+                    # Check for start/stop commands from backend server
+                    if "command" in msg:
+                        cmd = msg["command"]
+                        if cmd == "start":
+                            target_qr = msg["target_qr"]
+                            mock_mode = msg["mock_mode"]
+                            print(f"Received START command. Target: {target_qr}, Mock: {mock_mode}")
                             
-                    elif cmd == "stop":
-                        print("Received STOP command. Halting mission...")
-                        with runner_lock:
-                            if active_runner:
-                                active_runner.stop()
-                                active_runner = None
+                            with runner_lock:
+                                if active_runner is not None and active_runner.thread and active_runner.thread.is_alive():
+                                    print("Warning: A mission is already running locally.")
+                                    continue
+                                active_runner = LocalMissionRunner(target_qr, mock_mode)
+                                active_runner.start()
                                 
+                        elif cmd == "stop":
+                            print("Received STOP command. Halting mission...")
+                            with runner_lock:
+                                if active_runner:
+                                    active_runner.stop()
+                                    active_runner = None
+                                    
         except websockets.ConnectionClosed:
             print("Connection to cloud broker closed. Attempting reconnect...")
         except Exception as e:
@@ -329,6 +330,8 @@ async def client_listener(server_url):
         finally:
             with websocket_lock:
                 websocket_client = None
+        
+        await asyncio.sleep(2)
 
 
 def main():
