@@ -29,7 +29,7 @@ app.add_middleware(
 )
 
 # Global states
-current_frame = None
+current_frame_bytes = None
 robot_websocket: WebSocket = None
 robot_lock = threading.Lock()
 connected_websockets: List[WebSocket] = []
@@ -100,26 +100,20 @@ def get_mission_status():
     return {"status": "disconnected"}
 
 
+# Pre-cache offline frame bytes to avoid compressing on the fly
+offline_img = np.zeros((240, 320, 3), dtype=np.uint8)
+cv2.putText(offline_img, "Camera Offline", (60, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (90, 90, 90), 2)
+_, offline_buffer = cv2.imencode('.jpg', offline_img, [cv2.IMWRITE_JPEG_QUALITY, 50])
+OFFLINE_FRAME_BYTES = offline_buffer.tobytes()
+
 # MJPEG frame generator
 def gen_frames():
-    global current_frame
+    global current_frame_bytes
     while True:
-        frame_to_send = None
-        if current_frame is not None:
-            ret, buffer = cv2.imencode('.jpg', current_frame)
-            if ret:
-                frame_to_send = buffer.tobytes()
-        
-        if frame_to_send is None:
-            img = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(img, "Camera Offline", (160, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (90, 90, 90), 2)
-            ret, buffer = cv2.imencode('.jpg', img)
-            if ret:
-                frame_to_send = buffer.tobytes()
-
+        frame_to_send = current_frame_bytes if current_frame_bytes is not None else OFFLINE_FRAME_BYTES
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_to_send + b'\r\n')
-        time.sleep(0.06)
+        time.sleep(0.08)
 
 
 @app.get("/api/video_feed")
@@ -130,7 +124,7 @@ def video_feed():
 # WebSocket Endpoint for Robot Agent
 @app.websocket("/api/ws/robot")
 async def robot_websocket_endpoint(websocket: WebSocket):
-    global robot_websocket, current_frame
+    global robot_websocket, current_frame_bytes
     await websocket.accept()
     
     with robot_lock:
@@ -143,14 +137,10 @@ async def robot_websocket_endpoint(websocket: WebSocket):
         while True:
             msg = await websocket.receive_json()
             
-            # If msg is a perception frame, decode and set current_frame
+            # If msg is a perception frame, decode and set current_frame_bytes directly
             if msg.get("type") == "frame":
                 try:
-                    frame_bytes = base64.b64decode(msg["data"])
-                    nparr = np.frombuffer(frame_bytes, np.uint8)
-                    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                    if img is not None:
-                        current_frame = img
+                    current_frame_bytes = base64.b64decode(msg["data"])
                 except Exception as e:
                     print(f"Error decoding image: {e}")
             else:
@@ -165,7 +155,7 @@ async def robot_websocket_endpoint(websocket: WebSocket):
         with robot_lock:
             if robot_websocket == websocket:
                 robot_websocket = None
-        current_frame = None
+        current_frame_bytes = None
         broadcast_ws_message({"type": "log", "data": "[SYSTEM] Robot agent disconnected."})
         broadcast_ws_message({"type": "robot_status", "data": "disconnected"})
         broadcast_ws_message({"type": "status", "data": "idle"})

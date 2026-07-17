@@ -43,6 +43,14 @@ def send_message_to_server(msg: dict):
     asyncio.run_coroutine_threadsafe(async_send(), loop_ref)
 
 
+def get_grid_location(x: float, y: float):
+    # Map coordinate space (0.0 to 2.0 meters) to grid rows (1-5) and racks (1-5)
+    # Each grid square represents a 0.4m x 0.4m block
+    rack = min(5, max(1, int(x / 0.4) + 1))
+    row = min(5, max(1, int(y / 0.4) + 1))
+    return row, rack
+
+
 class LocalMissionRunner:
     def __init__(self, target_package: str, mock_mode: bool):
         self.target_package = target_package
@@ -102,30 +110,45 @@ class LocalMissionRunner:
 
     def _navigate_to(self, target_x, target_y, speed=0.20, tolerance=0.15, dt=0.5):
         logger = RobotLogger.get_logger()
-        logger.info(f"Navigating to ({target_x:.2f}, {target_y:.2f})...")
+        logger.info(f"Navigating orthogonally to ({target_x:.2f}, {target_y:.2f})...")
         
-        while not self._stop_event.is_set():
-            curr_x, curr_y = self.robot.get_position()
-            dist = math.hypot(target_x - curr_x, target_y - curr_y)
+        # Determine current position and generate orthogonal waypoints
+        start_x, start_y = self.robot.get_position()
+        
+        # We move along X axis first to target_x, then along Y axis to target_y
+        waypoints = []
+        if abs(target_x - start_x) > tolerance:
+            waypoints.append((target_x, start_y))
+        if abs(target_y - start_y) > tolerance:
+            waypoints.append((target_x, target_y))
             
-            if dist <= tolerance:
-                self.robot.stop()
-                logger.info(f"Arrived at destination: ({curr_x:.2f}, {curr_y:.2f})")
-                break
+        if not waypoints:
+            waypoints = [(target_x, target_y)]
+            
+        for wp_x, wp_y in waypoints:
+            logger.info(f"Navigating to waypoint ({wp_x:.2f}, {wp_y:.2f})...")
+            while not self._stop_event.is_set():
+                curr_x, curr_y = self.robot.get_position()
+                dist = math.hypot(wp_x - curr_x, wp_y - curr_y)
                 
-            heading = math.atan2(target_y - curr_y, target_x - curr_x)
-            new_x = curr_x + speed * math.cos(heading) * dt
-            new_y = curr_y + speed * math.sin(heading) * dt
-            
-            self.robot.move(speed, 0.0)
-            self.robot.update_position(new_x, new_y, heading)
-            
-            logger.info(f"Position: ({new_x:.2f}, {new_y:.2f}), Heading: {heading:.2f} rad")
-            
-            for _ in range(int(dt / 0.05)):
-                if self._stop_event.is_set():
+                if dist <= tolerance:
+                    self.robot.stop()
+                    logger.info(f"Reached waypoint: ({curr_x:.2f}, {curr_y:.2f})")
                     break
-                time.sleep(0.05)
+                    
+                heading = math.atan2(wp_y - curr_y, wp_x - curr_x)
+                new_x = curr_x + speed * math.cos(heading) * dt
+                new_y = curr_y + speed * math.sin(heading) * dt
+                
+                self.robot.move(speed, 0.0)
+                self.robot.update_position(new_x, new_y, heading)
+                
+                logger.info(f"Position: ({new_x:.2f}, {new_y:.2f}), Heading: {heading:.2f} rad")
+                
+                for _ in range(int(dt / 0.05)):
+                    if self._stop_event.is_set():
+                        break
+                    time.sleep(0.05)
 
     def _execute_mission(self):
         logger = RobotLogger.get_logger()
@@ -180,7 +203,9 @@ class LocalMissionRunner:
         last_log_time = 0.0
         last_frame_sent_time = 0.0
         
-        search_x, search_y = 2.0, 2.0
+        # Define search waypoints to move orthogonally (X-axis first, then Y-axis)
+        waypoints = [(2.0, 0.0), (2.0, 2.0)]
+        waypoint_idx = 0
         found_target = False
         qr_location = None
         wrong_package_id = "176f57db-42c7-486e-8fce-4661f650ea57"
@@ -189,20 +214,32 @@ class LocalMissionRunner:
             while not self._stop_event.is_set():
                 # 1. Update Position
                 curr_x, curr_y = self.robot.get_position()
-                dist_to_search = math.hypot(search_x - curr_x, search_y - curr_y)
 
-                if dist_to_search <= 0.15:
-                    if self.robot.linear_velocity != 0.0:
+                if waypoint_idx < len(waypoints):
+                    wp_x, wp_y = waypoints[waypoint_idx]
+                    dist_to_wp = math.hypot(wp_x - curr_x, wp_y - curr_y)
+
+                    if dist_to_wp <= 0.15:
                         self.robot.stop()
-                        logger.info("Reached end of search path. Pausing movement...")
-                    new_x, new_y = curr_x, curr_y
-                else:
-                    heading = math.atan2(search_y - curr_y, search_x - curr_x)
+                        logger.info(f"Reached waypoint {waypoint_idx}: ({curr_x:.2f}, {curr_y:.2f})")
+                        waypoint_idx += 1
+                        if waypoint_idx < len(waypoints):
+                            wp_x, wp_y = waypoints[waypoint_idx]
+                        else:
+                            logger.info("Reached end of search path. Pausing movement...")
+                            new_x, new_y = curr_x, curr_y
+                            continue
+
+                    heading = math.atan2(wp_y - curr_y, wp_x - curr_x)
                     new_x = curr_x + speed * math.cos(heading) * dt
                     new_y = curr_y + speed * math.sin(heading) * dt
 
                     self.robot.move(speed, 0.0)
                     self.robot.update_position(new_x, new_y, heading)
+                else:
+                    if self.robot.linear_velocity != 0.0:
+                        self.robot.stop()
+                    new_x, new_y = curr_x, curr_y
 
                 # 2. Camera Frame Capture
                 frame = cam.read()
@@ -224,10 +261,12 @@ class LocalMissionRunner:
 
                 display_frame = scanner.draw_detections(frame.copy(), detections, match_id=self.target_package)
 
-                # Upload frame to cloud at ~12 FPS to conserve internet upload bandwidth
+                # Upload frame to cloud at ~8 FPS to conserve internet upload bandwidth and prevent network lag
                 curr_time = time.time()
-                if curr_time - last_frame_sent_time >= 0.08:
-                    ret, encoded_img = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                if curr_time - last_frame_sent_time >= 0.12:
+                    # Downscale the display frame for web streaming to reduce bandwidth
+                    small_frame = cv2.resize(display_frame, (320, 240))
+                    ret, encoded_img = cv2.imencode('.jpg', small_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
                     if ret:
                         b64_frame = base64.b64encode(encoded_img.tobytes()).decode('utf-8')
                         send_message_to_server({"type": "frame", "data": b64_frame})
@@ -242,7 +281,8 @@ class LocalMissionRunner:
                         self.robot.stop()
                         found_target = True
                         qr_location = (new_x, new_y)
-                        logger.info(f"[MATCH] Found target package '{self.target_package}' at location ({new_x:.2f}, {new_y:.2f})!")
+                        row, rack = get_grid_location(new_x, new_y)
+                        logger.info(f"[MATCH] Target package found at Row {row}, Rack {rack} (Location: {new_x:.2f}, {new_y:.2f})!")
                         break
                     else:
                         logger.info(f"[NO MATCH] Decoded package ID: '{detected_qr}'. Expected: '{self.target_package}'. Continuing search...")
@@ -264,7 +304,8 @@ class LocalMissionRunner:
 
         if found_target:
             self.state_machine.transition(RobotState.TARGET_FOUND)
-            logger.info(f"Target verification complete at location: ({qr_location[0]:.2f}, {qr_location[1]:.2f})")
+            row, rack = get_grid_location(qr_location[0], qr_location[1])
+            logger.info(f"Target verification complete: Target found at Row {row}, Rack {rack} (Location: {qr_location[0]:.2f}, {qr_location[1]:.2f})")
             
             for _ in range(20):
                 if self._stop_event.is_set(): return
