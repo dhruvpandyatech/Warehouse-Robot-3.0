@@ -338,6 +338,11 @@ async function fetchInventory() {
         const response = await fetch(`${targets.http}/api/inventory`);
         const data = await response.json();
         
+        if (!Array.isArray(data)) {
+            console.warn('Inventory data is not an array:', data);
+            return;
+        }
+        
         const tbody = document.getElementById('inventoryTableBody');
         if (!tbody) return;
         
@@ -405,10 +410,31 @@ async function fetchInventory() {
             tdTime.style.padding = '6px';
             tdTime.style.color = '#aaa';
             if (item.last_scanned) {
-                // Extract and display the HH:MM:SS time portion directly
-                const timePart = item.last_scanned.split(' ')[1] || item.last_scanned;
-                tdTime.innerText = timePart;
-                tdTime.title = item.last_scanned + " (IST)";
+                const dateObj = new Date(item.last_scanned);
+                if (!isNaN(dateObj.getTime())) {
+                    const shortOptions = {
+                        day: 'numeric',
+                        month: 'short',
+                        hour: 'numeric',
+                        minute: '2-digit',
+                        second: '2-digit',
+                        hour12: true
+                    };
+                    tdTime.innerText = dateObj.toLocaleString('en-IN', shortOptions);
+                    
+                    const fullOptions = {
+                        day: 'numeric',
+                        month: 'long',
+                        year: 'numeric',
+                        hour: 'numeric',
+                        minute: '2-digit',
+                        second: '2-digit',
+                        hour12: true
+                    };
+                    tdTime.title = dateObj.toLocaleString('en-IN', fullOptions) + ' IST';
+                } else {
+                    tdTime.innerText = item.last_scanned;
+                }
             } else {
                 tdTime.innerText = '-';
             }

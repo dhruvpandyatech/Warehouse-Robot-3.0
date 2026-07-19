@@ -11,7 +11,7 @@ import numpy as np
 from pymongo import MongoClient
 from typing import List
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -169,7 +169,7 @@ def get_inventory():
         slots = list(inventory_col.find({}, {"_id": 0}).sort("slot_id", 1))
         return slots
     except Exception as e:
-        return {"status": "error", "message": f"Failed to fetch inventory: {e}"}
+        raise HTTPException(status_code=500, detail=f"Failed to fetch inventory: {e}")
 
 
 @app.post("/api/inventory/clear")
@@ -178,7 +178,7 @@ def clear_inventory():
         inventory_col.update_many({}, {"$set": {"package_id": None, "last_scanned": None}})
         return {"status": "success", "message": "Inventory cleared"}
     except Exception as e:
-        return {"status": "error", "message": f"Failed to clear inventory: {e}"}
+        raise HTTPException(status_code=500, detail=f"Failed to clear inventory: {e}")
 
 
 # Pre-cache offline frame bytes to avoid compressing on the fly
@@ -228,8 +228,7 @@ async def robot_websocket_endpoint(websocket: WebSocket):
                 # Handle slot_scanned updates in database
                 if msg.get("type") == "slot_scanned":
                     try:
-                        from datetime import datetime, timezone, timedelta
-                        ist_tz = timezone(timedelta(hours=5, minutes=30))
+                        from datetime import datetime, timezone
                         data = msg["data"]
                         row_val = int(data["row"])
                         rack_val = int(data["rack"])
@@ -239,12 +238,12 @@ async def robot_websocket_endpoint(websocket: WebSocket):
                         if pkg_val is not None:
                             inventory_col.update_many(
                                 {"package_id": pkg_val},
-                                {"$set": {"package_id": None, "last_scanned": datetime.now(ist_tz).strftime("%Y-%m-%d %H:%M:%S")}}
+                                {"$set": {"package_id": None, "last_scanned": datetime.now(timezone.utc).isoformat()}}
                             )
                         # Update the scanned slot
                         inventory_col.update_one(
                             {"row": row_val, "rack": rack_val},
-                            {"$set": {"package_id": pkg_val, "last_scanned": datetime.now(ist_tz).strftime("%Y-%m-%d %H:%M:%S")}}
+                            {"$set": {"package_id": pkg_val, "last_scanned": datetime.now(timezone.utc).isoformat()}}
                         )
                     except Exception as e:
                         print(f"Error updating slot: {e}")
@@ -252,8 +251,7 @@ async def robot_websocket_endpoint(websocket: WebSocket):
                 # Handle target_verified pickup updates in database
                 elif msg.get("type") == "target_verified":
                     try:
-                        from datetime import datetime, timezone, timedelta
-                        ist_tz = timezone(timedelta(hours=5, minutes=30))
+                        from datetime import datetime, timezone
                         data = msg["data"]
                         row_val = int(data["row"])
                         rack_val = int(data["rack"])
@@ -261,7 +259,7 @@ async def robot_websocket_endpoint(websocket: WebSocket):
                         # Clear target package since it has been picked up
                         inventory_col.update_one(
                             {"row": row_val, "rack": rack_val},
-                            {"$set": {"package_id": None, "last_scanned": datetime.now(ist_tz).strftime("%Y-%m-%d %H:%M:%S")}}
+                            {"$set": {"package_id": None, "last_scanned": datetime.now(timezone.utc).isoformat()}}
                         )
                     except Exception as e:
                         print(f"Error handling target_verified: {e}")
