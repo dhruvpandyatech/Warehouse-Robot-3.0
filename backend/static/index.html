@@ -52,13 +52,33 @@
                                 <label for="mockMode">Mock Camera Mode</label>
                             </div>
                         </div>
-                        <div class="button-group">
-                            <button type="submit" id="startBtn" class="btn btn-primary">START MISSION</button>
-                            <button type="button" id="stopBtn" class="btn btn-danger" disabled>STOP MISSION</button>
+                        <div class="button-group" style="display: flex; gap: 8px; flex-wrap: wrap;">
+                            <button type="submit" id="startBtn" class="btn btn-primary" style="flex: 1;">START MISSION</button>
+                            <button type="button" id="auditBtn" class="btn btn-warning" style="flex: 1; background: #ffb300; color: #111; border: none; font-weight: bold; border-radius: 4px; cursor: pointer; transition: all 0.2s;">RUN AUDIT</button>
+                            <button type="button" id="stopBtn" class="btn btn-danger" disabled style="flex: 1;">STOP MISSION</button>
                         </div>
                     </form>
 
-                    <div class="telemetry-display">
+                    <div class="inventory-display" style="margin-top: 20px; border-top: 1px solid rgba(0, 168, 255, 0.1); padding-top: 15px;">
+                        <h3 style="color: #00a8ff; font-size: 0.95rem; letter-spacing: 1px; margin-bottom: 10px; font-weight: 600;">INVENTORY DATABASE</h3>
+                        <div class="table-container" style="max-height: 160px; overflow-y: auto; border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 4px; background: rgba(0, 0, 0, 0.2);">
+                            <table class="inventory-table" style="width: 100%; border-collapse: collapse; font-size: 0.8rem; text-align: left;">
+                                <thead>
+                                    <tr style="border-bottom: 1px solid rgba(0, 168, 255, 0.15); background: rgba(0, 168, 255, 0.05);">
+                                        <th style="padding: 6px; color: #888; font-weight: 500;">Slot</th>
+                                        <th style="padding: 6px; color: #888; font-weight: 500;">Row/Col</th>
+                                        <th style="padding: 6px; color: #888; font-weight: 500;">Package ID</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="inventoryTableBody">
+                                    <!-- Dynamic rows from SQLite -->
+                                </tbody>
+                            </table>
+                        </div>
+                        <button type="button" id="clearInvBtn" class="btn btn-outline btn-sm" style="margin-top: 8px; width: 100%; font-size: 0.75rem; border: 1px solid rgba(255,255,255,0.1); color: #ccc; background: transparent; padding: 5px; border-radius: 4px; cursor: pointer; transition: all 0.2s;">CLEAR INVENTORY DB</button>
+                    </div>
+
+                    <div class="telemetry-display" style="margin-top: 20px; border-top: 1px solid rgba(0, 168, 255, 0.1); padding-top: 15px;">
                         <h3>TELEMETRY MONITOR</h3>
                         <div class="stat-grid">
                             <div class="stat-card">

@@ -8,6 +8,7 @@ import base64
 import threading
 import cv2
 import numpy as np
+from pymongo import MongoClient
 from typing import List
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -15,6 +16,42 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+# MongoDB Database Setup
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+print(f"Connecting to MongoDB: {MONGODB_URI}")
+
+try:
+    client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+    db = client["warehouse_db"]
+    inventory_col = db["inventory"]
+    # Trigger connection test
+    client.server_info()
+except Exception as e:
+    print(f"WARNING: Could not connect to MongoDB server: {e}")
+
+def init_db():
+    try:
+        if inventory_col.count_documents({}) == 0:
+            slots = []
+            for slot in range(1, 11):
+                row_num = 1 if slot <= 5 else 2
+                rack_num = slot if slot <= 5 else slot - 5
+                slots.append({
+                    "slot_id": slot,
+                    "row": row_num,
+                    "rack": rack_num,
+                    "package_id": None,
+                    "last_scanned": None
+                })
+            inventory_col.insert_many(slots)
+            print("Database initialized and seeded with 10 slots.")
+        else:
+            print("Database already contains records. Skipping seeding.")
+    except Exception as e:
+        print(f"Error initializing MongoDB database: {e}")
+
+init_db()
 
 # App initialization
 app = FastAPI(title="Warehouse Robot Cloud Gateway")
@@ -68,15 +105,41 @@ async def start_mission(req: StartMissionRequest):
     if robot_websocket is None:
         return {"status": "error", "message": "No robot agent is connected to the cloud server."}
     
+    # Query database for expected location of target_qr
+    expected_slot = None
+    try:
+        res = inventory_col.find_one({"package_id": req.target_qr})
+        if res:
+            expected_slot = {"row": res["row"], "rack": res["rack"]}
+    except Exception as e:
+        print(f"Database error during start lookup: {e}")
+
     try:
         await robot_websocket.send_json({
             "command": "start",
             "target_qr": req.target_qr,
-            "mock_mode": req.mock_mode
+            "mock_mode": req.mock_mode,
+            "expected_slot": expected_slot
         })
         return {"status": "success", "message": "Start command forwarded to robot."}
     except Exception as e:
         return {"status": "error", "message": f"Failed to send command to robot: {e}"}
+
+
+@app.post("/api/mission/audit")
+async def start_audit(mock_mode: bool = True):
+    global robot_websocket
+    if robot_websocket is None:
+        return {"status": "error", "message": "No robot agent is connected to the cloud server."}
+    
+    try:
+        await robot_websocket.send_json({
+            "command": "audit",
+            "mock_mode": mock_mode
+        })
+        return {"status": "success", "message": "Audit command forwarded to robot."}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to send audit command: {e}"}
 
 
 @app.post("/api/mission/stop")
@@ -98,6 +161,24 @@ def get_mission_status():
     if robot_websocket is not None:
         return {"status": "connected"}
     return {"status": "disconnected"}
+
+
+@app.get("/api/inventory")
+def get_inventory():
+    try:
+        slots = list(inventory_col.find({}, {"_id": 0}).sort("slot_id", 1))
+        return slots
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to fetch inventory: {e}"}
+
+
+@app.post("/api/inventory/clear")
+def clear_inventory():
+    try:
+        inventory_col.update_many({}, {"$set": {"package_id": None, "last_scanned": None}})
+        return {"status": "success", "message": "Inventory cleared"}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to clear inventory: {e}"}
 
 
 # Pre-cache offline frame bytes to avoid compressing on the fly
@@ -144,6 +225,45 @@ async def robot_websocket_endpoint(websocket: WebSocket):
                 except Exception as e:
                     print(f"Error decoding image: {e}")
             else:
+                # Handle slot_scanned updates in database
+                if msg.get("type") == "slot_scanned":
+                    try:
+                        from datetime import datetime
+                        data = msg["data"]
+                        row_val = int(data["row"])
+                        rack_val = int(data["rack"])
+                        pkg_val = data["package_id"]
+                        
+                        # De-duplicate: if this package was registered elsewhere, clear it
+                        if pkg_val is not None:
+                            inventory_col.update_many(
+                                {"package_id": pkg_val},
+                                {"$set": {"package_id": None, "last_scanned": datetime.now().isoformat()}}
+                            )
+                        # Update the scanned slot
+                        inventory_col.update_one(
+                            {"row": row_val, "rack": rack_val},
+                            {"$set": {"package_id": pkg_val, "last_scanned": datetime.now().isoformat()}}
+                        )
+                    except Exception as e:
+                        print(f"Error updating slot: {e}")
+                
+                # Handle target_verified pickup updates in database
+                elif msg.get("type") == "target_verified":
+                    try:
+                        from datetime import datetime
+                        data = msg["data"]
+                        row_val = int(data["row"])
+                        rack_val = int(data["rack"])
+                        
+                        # Clear target package since it has been picked up
+                        inventory_col.update_one(
+                            {"row": row_val, "rack": rack_val},
+                            {"$set": {"package_id": None, "last_scanned": datetime.now().isoformat()}}
+                        )
+                    except Exception as e:
+                        print(f"Error handling target_verified: {e}")
+
                 # Forward other telemetries, states and log messages to browser clients
                 broadcast_ws_message(msg)
                 

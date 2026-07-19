@@ -44,22 +44,111 @@ def send_message_to_server(msg: dict):
 
 
 def get_grid_location(x: float, y: float):
-    # Map coordinate space (0.0 to 2.0 meters) to grid rows (1-5) and racks (1-5)
-    # Each grid square represents a 0.4m x 0.4m block
-    rack = min(5, max(1, int(x / 0.4) + 1))
-    row = min(5, max(1, int(y / 0.4) + 1))
+    # Map coordinate space (0.0 to 2.0 meters) to grid rows (1-2) and racks (1-5)
+    # Centers: row 1 at y=0.5m, row 2 at y=1.5m; racks spaced every 0.4m from 0.2m
+    rack = min(5, max(1, int(round((x - 0.2) / 0.4)) + 1))
+    row = min(2, max(1, int(round((y - 0.5) / 1.0)) + 1))
     return row, rack
 
 
+def get_slot_coordinates(row: int, rack: int):
+    # Map row (1-2) and rack (1-5) back to physical target coordinates
+    x = 0.2 + (rack - 1) * 0.4
+    y = 0.5 + (row - 1) * 1.0
+    return x, y
+
+
+def solve_tsp(start_x: float, start_y: float, remaining_slots: list):
+    # Solves the TSP for remaining slots using full permutation search
+    # since number of slots is small (max 10), ensuring globally optimal shortest path.
+    if not remaining_slots:
+        return []
+    
+    import itertools
+    best_path = None
+    min_dist = float('inf')
+    
+    for perm in itertools.permutations(remaining_slots):
+        dist = 0.0
+        curr_x, curr_y = start_x, start_y
+        for row, rack in perm:
+            tx, ty = get_slot_coordinates(row, rack)
+            dist += abs(tx - curr_x) + abs(ty - curr_y)
+            curr_x, curr_y = tx, ty
+            
+        if dist < min_dist:
+            min_dist = dist
+            best_path = perm
+            
+    return list(best_path)
+
+
 class LocalMissionRunner:
-    def __init__(self, target_package: str, mock_mode: bool):
+    def __init__(self, target_package: str, mock_mode: bool, expected_slot: dict = None, is_audit: bool = False):
         self.target_package = target_package
         self.mock_mode = mock_mode
+        self.expected_slot = expected_slot
+        self.is_audit = is_audit
         self._stop_event = threading.Event()
         self.thread = None
         self.robot = None
         self.state_machine = None
         self.mission = None
+
+    def _scan_slot_robust(self, cam, scanner, is_mock, row, rack, num_frames=5):
+        logger = RobotLogger.get_logger()
+        logger.info(f"Performing precision scan at Row {row}, Rack {rack}...")
+        
+        # Stop robot to prevent motion blur
+        self.robot.stop()
+        time.sleep(0.15)
+        
+        reads = []
+        for _ in range(num_frames):
+            if self._stop_event.is_set():
+                return None
+                
+            frame = cam.read()
+            if frame is None:
+                time.sleep(0.05)
+                continue
+                
+            detections = []
+            if is_mock:
+                # Simulate QR code values based on row and rack
+                # Let's say target package is at Row 1, Rack 3 in mock mode
+                # Slot 1 has a wrong package
+                if row == 1 and rack == 3:
+                    detections = [(self.target_package, None)]
+                elif row == 1 and rack == 1:
+                    detections = [("176f57db-42c7-486e-8fce-4661f650ea57", None)]
+                else:
+                    detections = []
+            else:
+                detections = scanner.scan(frame)
+                
+            if detections:
+                detected_qr, _ = detections[0]
+                reads.append(detected_qr.strip())
+                
+            time.sleep(0.05)
+            
+        if not reads:
+            logger.warning(f"No QR code detected at Row {row}, Rack {rack}.")
+            return None
+            
+        # Multi-frame exposure filter: count frequencies
+        from collections import Counter
+        counts = Counter(reads)
+        most_common_qr, freq = counts.most_common(1)[0]
+        
+        # Require at least 2 consistent frames out of 5 to accept the read
+        if freq >= 2:
+            logger.info(f"Verified QR code at Row {row}, Rack {rack}: '{most_common_qr}' (confidence: {freq}/{num_frames})")
+            return most_common_qr
+        else:
+            logger.warning(f"Inconsistent QR reads at Row {row}, Rack {rack}: {counts}. Ignoring read.")
+            return None
 
     def start(self):
         self.thread = threading.Thread(target=self._run)
@@ -156,21 +245,7 @@ class LocalMissionRunner:
         self.state_machine.transition(RobotState.IDLE)
         time.sleep(0.5)
 
-        self.mission.assign_target(self.target_package)
-        time.sleep(0.5)
-
-        if self._stop_event.is_set(): return
-
-        self.state_machine.transition(RobotState.PLAN_PATH)
-        logger.info("Planning search path...")
-        for _ in range(20):
-            if self._stop_event.is_set(): return
-            time.sleep(0.05)
-
-        self.state_machine.transition(RobotState.NAVIGATING)
-        logger.info("Starting navigation search. Opening camera stream...")
-
-        # Setup Camera configuration
+        # 1. Start camera stream
         vision_config = VisionConfig()
         vision_config.mock_mode = self.mock_mode
 
@@ -188,7 +263,6 @@ class LocalMissionRunner:
         except Exception as e:
             logger.error(f"Failed to open camera: {e}")
             self.state_machine.transition(RobotState.ERROR)
-            self.mission.clear_target()
             return
 
         is_mock = vision_config.mock_mode or cam.mock_mode
@@ -197,134 +271,192 @@ class LocalMissionRunner:
         else:
             logger.info("Operating in REAL camera mode.")
 
-        start_time = time.time()
-        dt = 0.05
+        # Keep a local cache of slot contents read during this session
+        session_cache = {}
+
+        # Set up parameters
         speed = 0.20
-        last_log_time = 0.0
-        last_frame_sent_time = 0.0
-        
-        # Define search waypoints to move orthogonally (X-axis first, then Y-axis)
-        waypoints = [(2.0, 0.0), (2.0, 2.0)]
-        waypoint_idx = 0
+        dt = 0.5
         found_target = False
-        qr_location = None
-        wrong_package_id = "176f57db-42c7-486e-8fce-4661f650ea57"
+        final_slot = None
 
         try:
-            while not self._stop_event.is_set():
-                # 1. Update Position
+            # Check if this is an audit mission
+            if self.is_audit:
+                self.state_machine.transition(RobotState.NAVIGATING)
+                logger.info("Starting Full Inventory Audit Sweep...")
+                
+                # Full 10-slot snake sweep path
+                # Row 1: slots 1 to 5; Row 2: slots 10 down to 6
+                audit_slots = [(1, 1), (1, 2), (1, 3), (1, 4), (1, 5),
+                               (2, 5), (2, 4), (2, 3), (2, 2), (2, 1)]
+                
+                for row, rack in audit_slots:
+                    if self._stop_event.is_set():
+                        return
+                    
+                    # Navigate to slot
+                    target_x, target_y = get_slot_coordinates(row, rack)
+                    self._navigate_to(target_x, target_y, speed=speed, dt=dt)
+                    
+                    # Perform precision scan
+                    scanned_id = self._scan_slot_robust(cam, scanner, is_mock, row, rack)
+                    
+                    # Send scan update to server
+                    send_message_to_server({
+                        "type": "slot_scanned",
+                        "data": {
+                            "row": row,
+                            "rack": rack,
+                            "package_id": scanned_id
+                        }
+                    })
+                    time.sleep(0.5)
+                
+                self.state_machine.transition(RobotState.RETURNING_HOME)
+                self._navigate_to(0.0, 0.0, speed=speed, dt=dt)
+                self.state_machine.transition(RobotState.MISSION_COMPLETE)
+                logger.info("Audit sweep completed. Returned home successfully.")
+                return
+
+            # Otherwise, this is a target retrieval mission
+            self.mission.assign_target(self.target_package)
+            time.sleep(0.5)
+
+            # Determine where we expect the target to be (Tier 1)
+            target_row = None
+            target_rack = None
+            
+            if self.expected_slot:
+                target_row = self.expected_slot["row"]
+                target_rack = self.expected_slot["rack"]
+                logger.info(f"Target expected at Row {target_row}, Rack {target_rack} (from database).")
+            else:
+                logger.info("Target location unknown. Proceeding directly to full sweep search.")
+
+            # Run search tiers
+            # Tier 1: Direct check if target_row/rack is known
+            if target_row is not None and target_rack is not None:
+                self.state_machine.transition(RobotState.NAVIGATING)
+                tx, ty = get_slot_coordinates(target_row, target_rack)
+                self._navigate_to(tx, ty, speed=speed, dt=dt)
+                
+                # Precision Scan
+                scanned_id = self._scan_slot_robust(cam, scanner, is_mock, target_row, target_rack)
+                session_cache[(target_row, target_rack)] = scanned_id
+                
+                # Send update to server
+                send_message_to_server({
+                    "type": "slot_scanned",
+                    "data": {"row": target_row, "rack": target_rack, "package_id": scanned_id}
+                })
+
+                if scanned_id == self.target_package:
+                    found_target = True
+                    final_slot = (target_row, target_rack)
+                else:
+                    logger.warning(f"Target not at expected slot. Expected: '{self.target_package}'. Found: '{scanned_id}'.")
+                    
+                    # Tier 2: Nearest-Neighbor Local Check
+                    logger.info("Initiating Tier 2: Checking adjacent slots...")
+                    neighbors = []
+                    if target_rack > 1:
+                        neighbors.append((target_row, target_rack - 1))
+                    if target_rack < 5:
+                        neighbors.append((target_row, target_rack + 1))
+                    
+                    # We check the closest neighbor first. Since start is target_rack, we sort by distance
+                    for nrow, nrack in neighbors:
+                        if self._stop_event.is_set():
+                            return
+                        logger.info(f"Checking neighbor: Row {nrow}, Rack {nrack}...")
+                        ntx, nty = get_slot_coordinates(nrow, nrack)
+                        self._navigate_to(ntx, nty, speed=speed, dt=dt)
+                        
+                        n_scanned_id = self._scan_slot_robust(cam, scanner, is_mock, nrow, nrack)
+                        session_cache[(nrow, nrack)] = n_scanned_id
+                        
+                        send_message_to_server({
+                            "type": "slot_scanned",
+                            "data": {"row": nrow, "rack": nrack, "package_id": n_scanned_id}
+                        })
+                        
+                        if n_scanned_id == self.target_package:
+                            found_target = True
+                            final_slot = (nrow, nrack)
+                            break
+                        time.sleep(0.5)
+
+            # Tier 3: Global Sweep (if target is still not found or expected slot was unknown)
+            if not found_target:
+                logger.info("Target still not found. Initiating Tier 3: Global Shortest Path Sweep...")
+                self.state_machine.transition(RobotState.NAVIGATING)
+                
+                # Find all remaining unscanned slots
+                all_slots = [(r, c) for r in [1, 2] for c in range(1, 6)]
+                unscanned_slots = [s for s in all_slots if s not in session_cache]
+                
+                # Get current robot position
                 curr_x, curr_y = self.robot.get_position()
-
-                if waypoint_idx < len(waypoints):
-                    wp_x, wp_y = waypoints[waypoint_idx]
-                    dist_to_wp = math.hypot(wp_x - curr_x, wp_y - curr_y)
-
-                    if dist_to_wp <= 0.15:
-                        self.robot.stop()
-                        logger.info(f"Reached waypoint {waypoint_idx}: ({curr_x:.2f}, {curr_y:.2f})")
-                        waypoint_idx += 1
-                        if waypoint_idx < len(waypoints):
-                            wp_x, wp_y = waypoints[waypoint_idx]
-                        else:
-                            logger.info("Reached end of search path. Pausing movement...")
-                            new_x, new_y = curr_x, curr_y
-                            continue
-
-                    heading = math.atan2(wp_y - curr_y, wp_x - curr_x)
-                    new_x = curr_x + speed * math.cos(heading) * dt
-                    new_y = curr_y + speed * math.sin(heading) * dt
-
-                    self.robot.move(speed, 0.0)
-                    self.robot.update_position(new_x, new_y, heading)
-                else:
-                    if self.robot.linear_velocity != 0.0:
-                        self.robot.stop()
-                    new_x, new_y = curr_x, curr_y
-
-                # 2. Camera Frame Capture
-                frame = cam.read()
-                if frame is None:
-                    logger.warning("Failed to grab camera frame, retrying...")
-                    time.sleep(dt)
-                    continue
-
-                # 3. QR Detection logic
-                detections = []
-                if is_mock:
-                    elapsed = time.time() - start_time
-                    if 1.5 <= elapsed < 3.0:
-                        detections = [(wrong_package_id, np.array([[100, 100], [200, 100], [200, 200], [100, 200]], dtype=float))]
-                    elif elapsed >= 4.0:
-                        detections = [(self.target_package, np.array([[100, 100], [200, 100], [200, 200], [100, 200]], dtype=float))]
-                else:
-                    detections = scanner.scan(frame)
-
-                display_frame = scanner.draw_detections(frame.copy(), detections, match_id=self.target_package)
-
-                # Upload frame to cloud at ~8 FPS to conserve internet upload bandwidth and prevent network lag
-                curr_time = time.time()
-                if curr_time - last_frame_sent_time >= 0.12:
-                    # Downscale the display frame for web streaming to reduce bandwidth
-                    small_frame = cv2.resize(display_frame, (320, 240))
-                    ret, encoded_img = cv2.imencode('.jpg', small_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
-                    if ret:
-                        b64_frame = base64.b64encode(encoded_img.tobytes()).decode('utf-8')
-                        send_message_to_server({"type": "frame", "data": b64_frame})
-                    last_frame_sent_time = curr_time
-
-                # 5. Process Detections
-                if detections:
-                    detected_qr, _ = detections[0]
-                    logger.info(f"QR Code Detected: '{detected_qr}' at position ({new_x:.2f}, {new_y:.2f})")
-
-                    if detected_qr.strip() == self.target_package.strip():
-                        self.robot.stop()
+                
+                # Solve TSP for remaining slots
+                optimal_path = solve_tsp(curr_x, curr_y, unscanned_slots)
+                logger.info(f"Optimal remaining search path: {optimal_path}")
+                
+                for row, rack in optimal_path:
+                    if self._stop_event.is_set():
+                        return
+                    
+                    tx, ty = get_slot_coordinates(row, rack)
+                    self._navigate_to(tx, ty, speed=speed, dt=dt)
+                    
+                    scanned_id = self._scan_slot_robust(cam, scanner, is_mock, row, rack)
+                    session_cache[(row, rack)] = scanned_id
+                    
+                    send_message_to_server({
+                        "type": "slot_scanned",
+                        "data": {"row": row, "rack": rack, "package_id": scanned_id}
+                    })
+                    
+                    if scanned_id == self.target_package:
                         found_target = True
-                        qr_location = (new_x, new_y)
-                        row, rack = get_grid_location(new_x, new_y)
-                        logger.info(f"[MATCH] Target package found at Row {row}, Rack {rack} (Location: {new_x:.2f}, {new_y:.2f})!")
+                        final_slot = (row, rack)
                         break
-                    else:
-                        logger.info(f"[NO MATCH] Decoded package ID: '{detected_qr}'. Expected: '{self.target_package}'. Continuing search...")
+                    time.sleep(0.5)
 
-                else:
-                    curr_t = time.time()
-                    if curr_t - last_log_time >= 1.0:
-                        logger.info(f"Scanning... No QR code in frame (Position: {new_x:.2f}, {new_y:.2f})")
-                        last_log_time = curr_t
-
-                time.sleep(dt)
+            # Return home leg
+            if found_target:
+                self.state_machine.transition(RobotState.TARGET_FOUND)
+                logger.info(f"[MATCH] Target verification complete: Target found at Row {final_slot[0]}, Rack {final_slot[1]}!")
+                
+                # Send verification pickup message to server to clear slot
+                send_message_to_server({
+                    "type": "target_verified",
+                    "data": {
+                        "package": self.target_package,
+                        "row": final_slot[0],
+                        "rack": final_slot[1]
+                    }
+                })
+                
+                # Wait 1 second to simulate picking up
+                time.sleep(1.0)
+                
+                self.state_machine.transition(RobotState.RETURNING_HOME)
+                self._navigate_to(0.0, 0.0, speed=speed, dt=dt)
+                
+                self.state_machine.transition(RobotState.MISSION_COMPLETE)
+                logger.info("Returned home successfully. Mission complete!")
+            else:
+                self.state_machine.transition(RobotState.ERROR)
+                logger.error("Mission failed. Target package was not found in the warehouse.")
+                
+                self.state_machine.transition(RobotState.RETURNING_HOME)
+                self._navigate_to(0.0, 0.0, speed=speed, dt=dt)
 
         finally:
             cam.release()
-
-        if self._stop_event.is_set():
-            logger.warning("Mission was cancelled by user request.")
-            return
-
-        if found_target:
-            self.state_machine.transition(RobotState.TARGET_FOUND)
-            row, rack = get_grid_location(qr_location[0], qr_location[1])
-            logger.info(f"Target verification complete: Target found at Row {row}, Rack {rack} (Location: {qr_location[0]:.2f}, {qr_location[1]:.2f})")
-            
-            for _ in range(20):
-                if self._stop_event.is_set(): return
-                time.sleep(0.05)
-
-            self.state_machine.transition(RobotState.RETURNING_HOME)
-            self._navigate_to(target_x=0.0, target_y=0.0, speed=speed, dt=dt)
-            
-            if self._stop_event.is_set(): return
-            time.sleep(0.5)
-
-            self.state_machine.transition(RobotState.MISSION_COMPLETE)
-            logger.info("Returned home successfully. Mission complete!")
-            time.sleep(0.5)
-        else:
-            self.state_machine.transition(RobotState.ERROR)
-            logger.error("Mission failed. Target package was not found.")
-
-        self.mission.clear_target()
+            self.mission.clear_target()
 
 
 async def client_listener(server_url):
@@ -348,13 +480,25 @@ async def client_listener(server_url):
                         if cmd == "start":
                             target_qr = msg["target_qr"]
                             mock_mode = msg["mock_mode"]
-                            print(f"Received START command. Target: {target_qr}, Mock: {mock_mode}")
+                            expected_slot = msg.get("expected_slot")
+                            print(f"Received START command. Target: {target_qr}, Mock: {mock_mode}, Expected Slot: {expected_slot}")
                             
                             with runner_lock:
                                 if active_runner is not None and active_runner.thread and active_runner.thread.is_alive():
                                     print("Warning: A mission is already running locally.")
                                     continue
-                                active_runner = LocalMissionRunner(target_qr, mock_mode)
+                                active_runner = LocalMissionRunner(target_qr, mock_mode, expected_slot=expected_slot)
+                                active_runner.start()
+                                
+                        elif cmd == "audit":
+                            mock_mode = msg.get("mock_mode", True)
+                            print(f"Received AUDIT command. Mock: {mock_mode}")
+                            
+                            with runner_lock:
+                                if active_runner is not None and active_runner.thread and active_runner.thread.is_alive():
+                                    print("Warning: A mission is already running locally.")
+                                    continue
+                                active_runner = LocalMissionRunner(None, mock_mode, is_audit=True)
                                 active_runner.start()
                                 
                         elif cmd == "stop":

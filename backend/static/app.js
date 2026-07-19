@@ -119,6 +119,10 @@ function handleWsMessage(msg) {
         case 'log':
             appendRobotLog(msg.data);
             break;
+        case 'slot_scanned':
+        case 'target_verified':
+            fetchInventory();
+            break;
     }
 }
 
@@ -290,6 +294,86 @@ async function stopMission() {
     }
 }
 
+async function startAudit() {
+    const targets = getTargetUrls();
+    const isMock = document.getElementById('mockMode').checked;
+    try {
+        const response = await fetch(`${targets.http}/api/mission/audit?mock_mode=${isMock}`, {
+            method: 'POST'
+        });
+        const data = await response.json();
+        if (data.status === 'success') {
+            appendSystemLog('[SYSTEM] Audit command sent to robot.');
+            pathCoordinates = [];
+            document.getElementById('robotPath').setAttribute('d', 'M 0 200');
+        } else {
+            appendSystemLog(`[ERROR] Failed to start audit: ${data.message}`, 'error');
+        }
+    } catch (err) {
+        appendSystemLog(`[ERROR] Audit connect failed: ${err.message}`, 'error');
+    }
+}
+
+async function clearInventory() {
+    const targets = getTargetUrls();
+    try {
+        const response = await fetch(`${targets.http}/api/inventory/clear`, {
+            method: 'POST'
+        });
+        const data = await response.json();
+        if (data.status === 'success') {
+            appendSystemLog('[SYSTEM] Inventory database cleared.');
+            fetchInventory();
+        } else {
+            appendSystemLog(`[ERROR] Failed to clear database: ${data.message}`, 'error');
+        }
+    } catch (err) {
+        appendSystemLog(`[ERROR] Clear DB failed: ${err.message}`, 'error');
+    }
+}
+
+async function fetchInventory() {
+    const targets = getTargetUrls();
+    try {
+        const response = await fetch(`${targets.http}/api/inventory`);
+        const data = await response.json();
+        
+        const tbody = document.getElementById('inventoryTableBody');
+        if (!tbody) return;
+        
+        tbody.innerHTML = '';
+        data.forEach(item => {
+            const tr = document.createElement('tr');
+            tr.style.borderBottom = '1px solid rgba(255, 255, 255, 0.05)';
+            if (item.slot_id % 2 === 0) {
+                tr.style.background = 'rgba(0, 168, 255, 0.02)';
+            }
+            
+            const tdSlot = document.createElement('td');
+            tdSlot.style.padding = '6px';
+            tdSlot.innerText = `Slot ${item.slot_id}`;
+            
+            const tdLoc = document.createElement('td');
+            tdLoc.style.padding = '6px';
+            tdLoc.innerText = `R${item.row} - C${item.rack}`;
+            
+            const tdPkg = document.createElement('td');
+            tdPkg.style.padding = '6px';
+            tdPkg.style.fontFamily = 'monospace';
+            tdPkg.style.color = item.package_id ? '#00e676' : '#888';
+            tdPkg.innerText = item.package_id ? item.package_id.substring(0, 8) + '...' : 'Empty';
+            tdPkg.title = item.package_id || 'Empty';
+            
+            tr.appendChild(tdSlot);
+            tr.appendChild(tdLoc);
+            tr.appendChild(tdPkg);
+            tbody.appendChild(tr);
+        });
+    } catch (err) {
+        console.error('Failed to fetch inventory:', err);
+    }
+}
+
 // Load persisted API URL on start
 const savedUrl = localStorage.getItem('robotApiUrl');
 if (savedUrl) {
@@ -323,11 +407,24 @@ document.getElementById('stopBtn').addEventListener('click', () => {
     stopMission();
 });
 
+document.getElementById('auditBtn').addEventListener('click', () => {
+    startAudit();
+});
+
+document.getElementById('clearInvBtn').addEventListener('click', () => {
+    if (confirm('Are you sure you want to clear the inventory database?')) {
+        clearInventory();
+    }
+});
+
 document.getElementById('clearLogsBtn').addEventListener('click', () => {
     const consoleEl = document.getElementById('terminalConsole');
     consoleEl.innerHTML = '';
     appendSystemLog('[SYSTEM] Logs cleared.');
 });
 
-// Run connection routine
+// Run connection routine and start inventory polling
+fetchInventory();
+setInterval(fetchInventory, 2500);
+
 connectWebSocket();
