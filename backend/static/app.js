@@ -362,11 +362,35 @@ async function fetchInventory() {
             tdPkg.style.fontFamily = 'monospace';
             tdPkg.style.color = item.package_id ? '#00e676' : '#888';
             tdPkg.innerText = item.package_id ? item.package_id.substring(0, 8) + '...' : 'Empty';
-            tdPkg.title = item.package_id || 'Empty';
+            
+            if (item.package_id) {
+                tdPkg.style.cursor = 'pointer';
+                tdPkg.style.textDecoration = 'underline';
+                tdPkg.title = "Click to select as retrieval target";
+                tdPkg.addEventListener('click', () => {
+                    document.getElementById('targetQr').value = item.package_id;
+                    appendSystemLog(`[SYSTEM] Selected target package: ${item.package_id}`);
+                });
+            } else {
+                tdPkg.title = 'Empty';
+            }
+            
+            const tdTime = document.createElement('td');
+            tdTime.style.padding = '6px';
+            tdTime.style.color = '#aaa';
+            if (item.last_scanned) {
+                const dateObj = new Date(item.last_scanned);
+                const timeStr = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+                tdTime.innerText = timeStr;
+                tdTime.title = dateObj.toLocaleString();
+            } else {
+                tdTime.innerText = '-';
+            }
             
             tr.appendChild(tdSlot);
             tr.appendChild(tdLoc);
             tr.appendChild(tdPkg);
+            tr.appendChild(tdTime);
             tbody.appendChild(tr);
         });
     } catch (err) {

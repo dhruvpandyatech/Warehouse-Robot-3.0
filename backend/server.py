@@ -228,7 +228,8 @@ async def robot_websocket_endpoint(websocket: WebSocket):
                 # Handle slot_scanned updates in database
                 if msg.get("type") == "slot_scanned":
                     try:
-                        from datetime import datetime
+                        from datetime import datetime, timezone, timedelta
+                        ist_tz = timezone(timedelta(hours=5, minutes=30))
                         data = msg["data"]
                         row_val = int(data["row"])
                         rack_val = int(data["rack"])
@@ -238,12 +239,12 @@ async def robot_websocket_endpoint(websocket: WebSocket):
                         if pkg_val is not None:
                             inventory_col.update_many(
                                 {"package_id": pkg_val},
-                                {"$set": {"package_id": None, "last_scanned": datetime.now().isoformat()}}
+                                {"$set": {"package_id": None, "last_scanned": datetime.now(ist_tz).isoformat()}}
                             )
                         # Update the scanned slot
                         inventory_col.update_one(
                             {"row": row_val, "rack": rack_val},
-                            {"$set": {"package_id": pkg_val, "last_scanned": datetime.now().isoformat()}}
+                            {"$set": {"package_id": pkg_val, "last_scanned": datetime.now(ist_tz).isoformat()}}
                         )
                     except Exception as e:
                         print(f"Error updating slot: {e}")
@@ -251,7 +252,8 @@ async def robot_websocket_endpoint(websocket: WebSocket):
                 # Handle target_verified pickup updates in database
                 elif msg.get("type") == "target_verified":
                     try:
-                        from datetime import datetime
+                        from datetime import datetime, timezone, timedelta
+                        ist_tz = timezone(timedelta(hours=5, minutes=30))
                         data = msg["data"]
                         row_val = int(data["row"])
                         rack_val = int(data["rack"])
@@ -259,7 +261,7 @@ async def robot_websocket_endpoint(websocket: WebSocket):
                         # Clear target package since it has been picked up
                         inventory_col.update_one(
                             {"row": row_val, "rack": rack_val},
-                            {"$set": {"package_id": None, "last_scanned": datetime.now().isoformat()}}
+                            {"$set": {"package_id": None, "last_scanned": datetime.now(ist_tz).isoformat()}}
                         )
                     except Exception as e:
                         print(f"Error handling target_verified: {e}")

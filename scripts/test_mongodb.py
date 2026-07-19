@@ -60,7 +60,7 @@ def run_test():
         for item in simulated_db["inventory"]:
             if item["row"] == 1 and item["rack"] == 1:
                 item["package_id"] = scanned_pkg
-                item["last_scanned"] = datetime.datetime.now().isoformat()
+                item["last_scanned"] = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30))).isoformat()
                 updated = True
                 break
                 
@@ -110,7 +110,7 @@ def run_test():
         # De-duplicate
         test_col.update_many({"package_id": target_qr}, {"$set": {"package_id": None}})
         # Update
-        test_col.update_one({"row": 1, "rack": 3}, {"$set": {"package_id": target_qr, "last_scanned": datetime.datetime.now().isoformat()}})
+        test_col.update_one({"row": 1, "rack": 3}, {"$set": {"package_id": target_qr, "last_scanned": datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30))).isoformat()}})
         
         # Verify update
         updated_doc = test_col.find_one({"row": 1, "rack": 3})
