@@ -95,6 +95,30 @@ class LocalMissionRunner:
         self.state_machine = None
         self.mission = None
 
+    def _capture_and_send_frame(self, cam, scanner, detections=[]):
+        frame = cam.read()
+        if frame is None:
+            return None
+            
+        display_frame = scanner.draw_detections(frame.copy(), detections, match_id=self.target_package or "")
+        
+        curr_time = time.time()
+        if not hasattr(self, "_last_frame_sent_time"):
+            self._last_frame_sent_time = 0.0
+            
+        if curr_time - self._last_frame_sent_time >= 0.12:
+            try:
+                small_frame = cv2.resize(display_frame, (320, 240))
+                ret, encoded_img = cv2.imencode('.jpg', small_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                if ret:
+                    b64_frame = base64.b64encode(encoded_img.tobytes()).decode('utf-8')
+                    send_message_to_server({"type": "frame", "data": b64_frame})
+                self._last_frame_sent_time = curr_time
+            except Exception:
+                pass
+                
+        return frame
+
     def _scan_slot_robust(self, cam, scanner, is_mock, row, rack, num_frames=5):
         logger = RobotLogger.get_logger()
         logger.info(f"Performing precision scan at Row {row}, Rack {rack}...")
@@ -115,9 +139,6 @@ class LocalMissionRunner:
                 
             detections = []
             if is_mock:
-                # Simulate QR code values based on row and rack
-                # Let's say target package is at Row 1, Rack 3 in mock mode
-                # Slot 1 has a wrong package
                 if row == 1 and rack == 3:
                     detections = [(self.target_package, None)]
                 elif row == 1 and rack == 1:
@@ -131,18 +152,27 @@ class LocalMissionRunner:
                 detected_qr, _ = detections[0]
                 reads.append(detected_qr.strip())
                 
+            # Stream this scanned frame with outlines immediately to dashboard
+            display_frame = scanner.draw_detections(frame.copy(), detections, match_id=self.target_package or "")
+            try:
+                small_frame = cv2.resize(display_frame, (320, 240))
+                ret, encoded_img = cv2.imencode('.jpg', small_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                if ret:
+                    b64_frame = base64.b64encode(encoded_img.tobytes()).decode('utf-8')
+                    send_message_to_server({"type": "frame", "data": b64_frame})
+            except Exception:
+                pass
+                
             time.sleep(0.05)
             
         if not reads:
             logger.warning(f"No QR code detected at Row {row}, Rack {rack}.")
             return None
             
-        # Multi-frame exposure filter: count frequencies
         from collections import Counter
         counts = Counter(reads)
         most_common_qr, freq = counts.most_common(1)[0]
         
-        # Require at least 2 consistent frames out of 5 to accept the read
         if freq >= 2:
             logger.info(f"Verified QR code at Row {row}, Rack {rack}: '{most_common_qr}' (confidence: {freq}/{num_frames})")
             return most_common_qr
@@ -197,14 +227,12 @@ class LocalMissionRunner:
             send_message_to_server({"type": "status", "data": "idle"})
             logger.info("Local mission runner finished.")
 
-    def _navigate_to(self, target_x, target_y, speed=0.20, tolerance=0.15, dt=0.5):
+    def _navigate_to(self, target_x, target_y, cam, scanner, speed=0.20, tolerance=0.15, dt=0.5):
         logger = RobotLogger.get_logger()
         logger.info(f"Navigating orthogonally to ({target_x:.2f}, {target_y:.2f})...")
         
-        # Determine current position and generate orthogonal waypoints
         start_x, start_y = self.robot.get_position()
         
-        # We move along X axis first to target_x, then along Y axis to target_y
         waypoints = []
         if abs(target_x - start_x) > tolerance:
             waypoints.append((target_x, start_y))
@@ -234,9 +262,11 @@ class LocalMissionRunner:
                 
                 logger.info(f"Position: ({new_x:.2f}, {new_y:.2f}), Heading: {heading:.2f} rad")
                 
-                for _ in range(int(dt / 0.05)):
+                start_drive_wait = time.time()
+                while time.time() - start_drive_wait < dt:
                     if self._stop_event.is_set():
                         break
+                    self._capture_and_send_frame(cam, scanner)
                     time.sleep(0.05)
 
     def _execute_mission(self):
@@ -297,7 +327,7 @@ class LocalMissionRunner:
                     
                     # Navigate to slot
                     target_x, target_y = get_slot_coordinates(row, rack)
-                    self._navigate_to(target_x, target_y, speed=speed, dt=dt)
+                    self._navigate_to(target_x, target_y, cam, scanner, speed=speed, dt=dt)
                     
                     # Perform precision scan
                     scanned_id = self._scan_slot_robust(cam, scanner, is_mock, row, rack)
@@ -314,7 +344,7 @@ class LocalMissionRunner:
                     time.sleep(0.5)
                 
                 self.state_machine.transition(RobotState.RETURNING_HOME)
-                self._navigate_to(0.0, 0.0, speed=speed, dt=dt)
+                self._navigate_to(0.0, 0.0, cam, scanner, speed=speed, dt=dt)
                 self.state_machine.transition(RobotState.MISSION_COMPLETE)
                 logger.info("Audit sweep completed. Returned home successfully.")
                 return
@@ -339,7 +369,7 @@ class LocalMissionRunner:
             if target_row is not None and target_rack is not None:
                 self.state_machine.transition(RobotState.NAVIGATING)
                 tx, ty = get_slot_coordinates(target_row, target_rack)
-                self._navigate_to(tx, ty, speed=speed, dt=dt)
+                self._navigate_to(tx, ty, cam, scanner, speed=speed, dt=dt)
                 
                 # Precision Scan
                 scanned_id = self._scan_slot_robust(cam, scanner, is_mock, target_row, target_rack)
@@ -371,7 +401,7 @@ class LocalMissionRunner:
                             return
                         logger.info(f"Checking neighbor: Row {nrow}, Rack {nrack}...")
                         ntx, nty = get_slot_coordinates(nrow, nrack)
-                        self._navigate_to(ntx, nty, speed=speed, dt=dt)
+                        self._navigate_to(ntx, nty, cam, scanner, speed=speed, dt=dt)
                         
                         n_scanned_id = self._scan_slot_robust(cam, scanner, is_mock, nrow, nrack)
                         session_cache[(nrow, nrack)] = n_scanned_id
@@ -408,7 +438,7 @@ class LocalMissionRunner:
                         return
                     
                     tx, ty = get_slot_coordinates(row, rack)
-                    self._navigate_to(tx, ty, speed=speed, dt=dt)
+                    self._navigate_to(tx, ty, cam, scanner, speed=speed, dt=dt)
                     
                     scanned_id = self._scan_slot_robust(cam, scanner, is_mock, row, rack)
                     session_cache[(row, rack)] = scanned_id
@@ -443,7 +473,7 @@ class LocalMissionRunner:
                 time.sleep(1.0)
                 
                 self.state_machine.transition(RobotState.RETURNING_HOME)
-                self._navigate_to(0.0, 0.0, speed=speed, dt=dt)
+                self._navigate_to(0.0, 0.0, cam, scanner, speed=speed, dt=dt)
                 
                 self.state_machine.transition(RobotState.MISSION_COMPLETE)
                 logger.info("Returned home successfully. Mission complete!")
@@ -452,7 +482,7 @@ class LocalMissionRunner:
                 logger.error("Mission failed. Target package was not found in the warehouse.")
                 
                 self.state_machine.transition(RobotState.RETURNING_HOME)
-                self._navigate_to(0.0, 0.0, speed=speed, dt=dt)
+                self._navigate_to(0.0, 0.0, cam, scanner, speed=speed, dt=dt)
 
         finally:
             cam.release()
