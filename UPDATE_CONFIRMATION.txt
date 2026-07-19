@@ -1,0 +1,44 @@
+========================================================================
+WAREHOUSE ROBOT CONTROL SYSTEM - UPDATE CONFIRMATION
+========================================================================
+
+TIMESTAMP OF UPDATE (IST): 19 July 2026, 9:45 PM IST
+
+This folder has been fully updated and verified for deployment to Render.
+
+------------------------------------------------------------------------
+MODIFIED FILES IN THIS UPDATE:
+------------------------------------------------------------------------
+1. [robot_agent.py]
+   - Restored runner start/stop/run execution thread methods.
+   - Updated all `_navigate_to` coordinates mapping calls to stream MJPEG camera frames at 8 FPS during movement.
+   - Fixed camera offline perception stream on dashboard.
+
+2. [backend/server.py]
+   - Converted database timestamps to standard timezone-aware UTC ISO formats.
+   - Added robust HTTP exceptions if database connections timeout to prevent server crashes.
+
+3. [backend/static/index.html]
+   - Added a "Last Scanned" table header column to the Inventory Database panel.
+   - Added a cache-busting version query string (?v=2) to the JS script tag to force updates.
+
+4. [backend/static/app.js]
+   - Rendered a bright blue "SELECT" button next to each scanned package ID in the table.
+   - Wired selection click events to auto-fill the target input field.
+   - Added local timezone conversion (en-IN / IST) for scan timestamps in the table cells and hover tooltips.
+   - Added safety array check logic to prevent browser layout crashes if database is offline.
+
+5. [scripts/test_mongodb.py]
+   - Restored database connection and schema tests to match the UTC timestamp format.
+
+------------------------------------------------------------------------
+INSTRUCTIONS FOR DHRUV:
+------------------------------------------------------------------------
+- Please replace the files in your Git repository with these updated files.
+- Commit all changes and push them to your GitHub repository (main branch).
+- Render will automatically build the web service.
+- Once Render is "Live", tell your friend to do a hard refresh (Ctrl + F5) on their browser, run an audit, and test the SELECT buttons and IST timestamps!
+
+========================================================================
+STATUS: VERIFIED & READY FOR ZIP DEPLOYMENT
+========================================================================
