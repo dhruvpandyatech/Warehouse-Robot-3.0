@@ -361,17 +361,43 @@ async function fetchInventory() {
             tdPkg.style.padding = '6px';
             tdPkg.style.fontFamily = 'monospace';
             tdPkg.style.color = item.package_id ? '#00e676' : '#888';
-            tdPkg.innerText = item.package_id ? item.package_id.substring(0, 8) + '...' : 'Empty';
             
             if (item.package_id) {
-                tdPkg.style.cursor = 'pointer';
-                tdPkg.style.textDecoration = 'underline';
-                tdPkg.title = "Click to select as retrieval target";
-                tdPkg.addEventListener('click', () => {
+                const container = document.createElement('div');
+                container.style.display = 'flex';
+                container.style.alignItems = 'center';
+                container.style.gap = '8px';
+                
+                const idText = document.createElement('span');
+                idText.innerText = item.package_id.substring(0, 8) + '...';
+                idText.title = item.package_id;
+                
+                const selectBtn = document.createElement('button');
+                selectBtn.innerText = 'SELECT';
+                selectBtn.style.padding = '2px 6px';
+                selectBtn.style.fontSize = '0.7rem';
+                selectBtn.style.background = '#00a8ff';
+                selectBtn.style.color = '#fff';
+                selectBtn.style.border = 'none';
+                selectBtn.style.borderRadius = '3px';
+                selectBtn.style.cursor = 'pointer';
+                selectBtn.style.fontWeight = 'bold';
+                selectBtn.style.transition = 'all 0.2s';
+                
+                selectBtn.onmouseover = () => { selectBtn.style.background = '#008bcf'; };
+                selectBtn.onmouseout = () => { selectBtn.style.background = '#00a8ff'; };
+                
+                selectBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
                     document.getElementById('targetQr').value = item.package_id;
-                    appendSystemLog(`[SYSTEM] Selected target package: ${item.package_id}`);
+                    appendSystemLog(`[SYSTEM] Loaded target QR code: ${item.package_id}`);
                 });
+                
+                container.appendChild(idText);
+                container.appendChild(selectBtn);
+                tdPkg.appendChild(container);
             } else {
+                tdPkg.innerText = 'Empty';
                 tdPkg.title = 'Empty';
             }
             
@@ -379,10 +405,10 @@ async function fetchInventory() {
             tdTime.style.padding = '6px';
             tdTime.style.color = '#aaa';
             if (item.last_scanned) {
-                const dateObj = new Date(item.last_scanned);
-                const timeStr = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-                tdTime.innerText = timeStr;
-                tdTime.title = dateObj.toLocaleString();
+                // Extract and display the HH:MM:SS time portion directly
+                const timePart = item.last_scanned.split(' ')[1] || item.last_scanned;
+                tdTime.innerText = timePart;
+                tdTime.title = item.last_scanned + " (IST)";
             } else {
                 tdTime.innerText = '-';
             }

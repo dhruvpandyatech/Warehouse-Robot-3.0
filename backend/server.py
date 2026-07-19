@@ -239,12 +239,12 @@ async def robot_websocket_endpoint(websocket: WebSocket):
                         if pkg_val is not None:
                             inventory_col.update_many(
                                 {"package_id": pkg_val},
-                                {"$set": {"package_id": None, "last_scanned": datetime.now(ist_tz).isoformat()}}
+                                {"$set": {"package_id": None, "last_scanned": datetime.now(ist_tz).strftime("%Y-%m-%d %H:%M:%S")}}
                             )
                         # Update the scanned slot
                         inventory_col.update_one(
                             {"row": row_val, "rack": rack_val},
-                            {"$set": {"package_id": pkg_val, "last_scanned": datetime.now(ist_tz).isoformat()}}
+                            {"$set": {"package_id": pkg_val, "last_scanned": datetime.now(ist_tz).strftime("%Y-%m-%d %H:%M:%S")}}
                         )
                     except Exception as e:
                         print(f"Error updating slot: {e}")
@@ -261,7 +261,7 @@ async def robot_websocket_endpoint(websocket: WebSocket):
                         # Clear target package since it has been picked up
                         inventory_col.update_one(
                             {"row": row_val, "rack": rack_val},
-                            {"$set": {"package_id": None, "last_scanned": datetime.now(ist_tz).isoformat()}}
+                            {"$set": {"package_id": None, "last_scanned": datetime.now(ist_tz).strftime("%Y-%m-%d %H:%M:%S")}}
                         )
                     except Exception as e:
                         print(f"Error handling target_verified: {e}")
