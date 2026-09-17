@@ -150,22 +150,19 @@ class LocalMissionRunner:
                 
         return frame
 
-    def _scan_slot_robust(self, cam, scanner, is_mock, row, rack, num_frames=5):
+    def _scan_slot_robust(self, cam, scanner, is_mock, row, rack, max_frames=2):
         logger = RobotLogger.get_logger()
-        logger.info(f"Performing precision scan at Row {row}, Rack {rack}...")
+        logger.info(f"Precision scan at Row {row}, Rack {rack}...")
         
-        # Stop robot to prevent motion blur
         self.robot.stop()
-        time.sleep(0.15)
         
         reads = []
-        for _ in range(num_frames):
+        for frame_idx in range(max_frames):
             if self._stop_event.is_set():
                 return None
                 
             frame = cam.read()
             if frame is None:
-                time.sleep(0.05)
                 continue
                 
             detections = []
@@ -193,23 +190,19 @@ class LocalMissionRunner:
                     send_frame_to_server(b64_frame)
             except Exception:
                 pass
-                
-            time.sleep(0.05)
+
+            # Early exit: once a QR is detected, finish scan immediately (< 0.1s)
+            if detections:
+                break
+            time.sleep(0.02)
             
         if not reads:
             logger.warning(f"No QR code detected at Row {row}, Rack {rack}.")
             return None
             
-        from collections import Counter
-        counts = Counter(reads)
-        most_common_qr, freq = counts.most_common(1)[0]
-        
-        if freq >= 2:
-            logger.info(f"Verified QR code at Row {row}, Rack {rack}: '{most_common_qr}' (confidence: {freq}/{num_frames})")
-            return most_common_qr
-        else:
-            logger.warning(f"Inconsistent QR reads at Row {row}, Rack {rack}: {counts}. Ignoring read.")
-            return None
+        detected_qr = reads[0]
+        logger.info(f"Verified QR code at Row {row}, Rack {rack}: '{detected_qr}'")
+        return detected_qr
 
     def start(self):
         self.thread = threading.Thread(target=self._run)
@@ -366,7 +359,7 @@ class LocalMissionRunner:
                             "package_id": scanned_id
                         }
                     })
-                    time.sleep(0.5)
+                    time.sleep(0.08)
                 
                 self.state_machine.transition(RobotState.RETURNING_HOME)
                 self._navigate_to(0.0, 0.0, cam, scanner, speed=speed, dt=dt)
@@ -376,7 +369,7 @@ class LocalMissionRunner:
 
             # Otherwise, this is a target retrieval mission
             self.mission.assign_target(self.target_package)
-            time.sleep(0.5)
+            time.sleep(0.1)
 
             # Determine where we expect the target to be (Tier 1)
             target_row = None
@@ -440,7 +433,7 @@ class LocalMissionRunner:
                             found_target = True
                             final_slot = (nrow, nrack)
                             break
-                        time.sleep(0.5)
+                        time.sleep(0.08)
 
             # Tier 3: Global Sweep (if target is still not found or expected slot was unknown)
             if not found_target:
@@ -477,7 +470,7 @@ class LocalMissionRunner:
                         found_target = True
                         final_slot = (row, rack)
                         break
-                    time.sleep(0.5)
+                    time.sleep(0.08)
 
             # Return home leg
             if found_target:
