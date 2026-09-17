@@ -27,7 +27,38 @@ websocket_client = None
 websocket_lock = threading.Lock()
 
 # Thread-safe queue or event loop caller for outbound websocket messages
-loop_ref = None
+_frame_in_flight = False
+_frame_lock = threading.Lock()
+
+def send_frame_to_server(b64_data: str):
+    """Send video frame without queuing or buffer bloat - drops stale frames when network is busy."""
+    global websocket_client, loop_ref, _frame_in_flight
+    if websocket_client is None or loop_ref is None:
+        return
+    with _frame_lock:
+        if _frame_in_flight:
+            return  # Skip frame if previous frame is still in-flight
+        _frame_in_flight = True
+
+    payload = json.dumps({"type": "frame", "data": b64_data})
+
+    async def async_send():
+        global _frame_in_flight
+        try:
+            if websocket_client:
+                await websocket_client.send(payload)
+        except Exception:
+            pass
+        finally:
+            with _frame_lock:
+                _frame_in_flight = False
+
+    try:
+        asyncio.run_coroutine_threadsafe(async_send(), loop_ref)
+    except Exception:
+        with _frame_lock:
+            _frame_in_flight = False
+
 
 def send_message_to_server(msg: dict):
     global websocket_client, loop_ref
@@ -106,13 +137,13 @@ class LocalMissionRunner:
         if not hasattr(self, "_last_frame_sent_time"):
             self._last_frame_sent_time = 0.0
             
-        if curr_time - self._last_frame_sent_time >= 0.12:
+        if curr_time - self._last_frame_sent_time >= 0.07:
             try:
                 small_frame = cv2.resize(display_frame, (320, 240))
-                ret, encoded_img = cv2.imencode('.jpg', small_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                ret, encoded_img = cv2.imencode('.jpg', small_frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
                 if ret:
                     b64_frame = base64.b64encode(encoded_img.tobytes()).decode('utf-8')
-                    send_message_to_server({"type": "frame", "data": b64_frame})
+                    send_frame_to_server(b64_frame)
                 self._last_frame_sent_time = curr_time
             except Exception:
                 pass
@@ -156,10 +187,10 @@ class LocalMissionRunner:
             display_frame = scanner.draw_detections(frame.copy(), detections, match_id=self.target_package or "")
             try:
                 small_frame = cv2.resize(display_frame, (320, 240))
-                ret, encoded_img = cv2.imencode('.jpg', small_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                ret, encoded_img = cv2.imencode('.jpg', small_frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
                 if ret:
                     b64_frame = base64.b64encode(encoded_img.tobytes()).decode('utf-8')
-                    send_message_to_server({"type": "frame", "data": b64_frame})
+                    send_frame_to_server(b64_frame)
             except Exception:
                 pass
                 
@@ -227,7 +258,7 @@ class LocalMissionRunner:
             send_message_to_server({"type": "status", "data": "idle"})
             logger.info("Local mission runner finished.")
 
-    def _navigate_to(self, target_x, target_y, cam, scanner, speed=0.20, tolerance=0.15, dt=0.5):
+    def _navigate_to(self, target_x, target_y, cam, scanner, speed=0.20, tolerance=0.15, dt=0.08):
         logger = RobotLogger.get_logger()
         logger.info(f"Navigating orthogonally to ({target_x:.2f}, {target_y:.2f})...")
         
@@ -260,14 +291,8 @@ class LocalMissionRunner:
                 self.robot.move(speed, 0.0)
                 self.robot.update_position(new_x, new_y, heading)
                 
-                logger.info(f"Position: ({new_x:.2f}, {new_y:.2f}), Heading: {heading:.2f} rad")
-                
-                start_drive_wait = time.time()
-                while time.time() - start_drive_wait < dt:
-                    if self._stop_event.is_set():
-                        break
-                    self._capture_and_send_frame(cam, scanner)
-                    time.sleep(0.05)
+                self._capture_and_send_frame(cam, scanner)
+                time.sleep(dt)
 
     def _execute_mission(self):
         logger = RobotLogger.get_logger()
@@ -306,7 +331,7 @@ class LocalMissionRunner:
 
         # Set up parameters
         speed = 0.20
-        dt = 0.5
+        dt = 0.08
         found_target = False
         final_slot = None
 

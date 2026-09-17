@@ -388,6 +388,14 @@ body {
     overflow: visible;
 }
 
+#robotMarker {
+    transition: transform 0.09s linear;
+}
+
+#robotDirection {
+    transition: transform 0.09s linear;
+}
+
 .map-label {
     font-size: 8px;
     font-family: var(--font-mono);

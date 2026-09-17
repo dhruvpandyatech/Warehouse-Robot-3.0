@@ -117,7 +117,20 @@ robot_websocket: WebSocket = None
 robot_lock = threading.Lock()
 connected_websockets: List[WebSocket] = []
 
-# WebSocket Message Broadcast to web clients
+async def broadcast_ws_message_async(msg: dict):
+    """Direct asynchronous broadcast to connected web clients with zero thread-switching overhead."""
+    disconnected = []
+    for ws in list(connected_websockets):
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            disconnected.append(ws)
+    for ws in disconnected:
+        if ws in connected_websockets:
+            connected_websockets.remove(ws)
+
+
+# WebSocket Message Broadcast to web clients (sync/threadsafe fallback)
 def broadcast_ws_message(msg: dict):
     loop = None
     try:
@@ -125,19 +138,8 @@ def broadcast_ws_message(msg: dict):
     except RuntimeError:
         pass
 
-    async def run_broadcast():
-        disconnected = []
-        for ws in connected_websockets:
-            try:
-                await ws.send_json(msg)
-            except Exception:
-                disconnected.append(ws)
-        for ws in disconnected:
-            if ws in connected_websockets:
-                connected_websockets.remove(ws)
-
     if loop and loop.is_running():
-        asyncio.run_coroutine_threadsafe(run_broadcast(), loop)
+        asyncio.run_coroutine_threadsafe(broadcast_ws_message_async(msg), loop)
 
 
 class StartMissionRequest(BaseModel):
@@ -264,8 +266,8 @@ async def robot_websocket_endpoint(websocket: WebSocket):
     with robot_lock:
         robot_websocket = websocket
         
-    broadcast_ws_message({"type": "log", "data": "[SYSTEM] Robot agent connected to cloud gateway."})
-    broadcast_ws_message({"type": "robot_status", "data": "connected"})
+    await broadcast_ws_message_async({"type": "log", "data": "[SYSTEM] Robot agent connected to cloud gateway."})
+    await broadcast_ws_message_async({"type": "robot_status", "data": "connected"})
     
     try:
         while True:
@@ -275,9 +277,9 @@ async def robot_websocket_endpoint(websocket: WebSocket):
             if msg.get("type") == "frame":
                 try:
                     current_frame_bytes = base64.b64decode(msg["data"])
-                    broadcast_ws_message(msg)
                 except Exception as e:
                     print(f"Error decoding image: {e}")
+                await broadcast_ws_message_async(msg)
             else:
                 # Handle slot_scanned updates in database
                 if msg.get("type") == "slot_scanned":
@@ -319,7 +321,7 @@ async def robot_websocket_endpoint(websocket: WebSocket):
                         print(f"Error handling target_verified: {e}")
 
                 # Forward other telemetries, states and log messages to browser clients
-                broadcast_ws_message(msg)
+                await broadcast_ws_message_async(msg)
                 
     except WebSocketDisconnect:
         pass
@@ -330,10 +332,10 @@ async def robot_websocket_endpoint(websocket: WebSocket):
             if robot_websocket == websocket:
                 robot_websocket = None
         current_frame_bytes = None
-        broadcast_ws_message({"type": "log", "data": "[SYSTEM] Robot agent disconnected."})
-        broadcast_ws_message({"type": "robot_status", "data": "disconnected"})
-        broadcast_ws_message({"type": "status", "data": "idle"})
-        broadcast_ws_message({"type": "frame", "data": None})
+        await broadcast_ws_message_async({"type": "log", "data": "[SYSTEM] Robot agent disconnected."})
+        await broadcast_ws_message_async({"type": "robot_status", "data": "disconnected"})
+        await broadcast_ws_message_async({"type": "status", "data": "idle"})
+        await broadcast_ws_message_async({"type": "frame", "data": None})
 
 
 # WebSocket Endpoint for Browser Web Clients
