@@ -17,18 +17,64 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+class InMemoryInventoryCollection:
+    """In-memory database fallback for when MongoDB is offline or running locally without MongoDB."""
+    def __init__(self):
+        self.slots = []
+
+    def count_documents(self, filter_query=None):
+        return len(self.slots)
+
+    def insert_many(self, documents):
+        self.slots.extend([dict(d) for d in documents])
+
+    def find_one(self, filter_query):
+        for item in self.slots:
+            if all(item.get(k) == v for k, v in filter_query.items()):
+                return dict(item)
+        return None
+
+    class _QueryResult:
+        def __init__(self, data):
+            self.data = data
+        def sort(self, key, direction=1):
+            return sorted(self.data, key=lambda x: x.get(key, 0), reverse=(direction == -1))
+        def __iter__(self):
+            return iter(self.data)
+
+    def find(self, filter_query=None, projection=None):
+        results = [dict(s) for s in self.slots]
+        return self._QueryResult(results)
+
+    def update_one(self, filter_query, update_dict):
+        set_vals = update_dict.get("$set", {})
+        for item in self.slots:
+            if all(item.get(k) == v for k, v in filter_query.items()):
+                item.update(set_vals)
+                break
+
+    def update_many(self, filter_query, update_dict):
+        set_vals = update_dict.get("$set", {})
+        for item in self.slots:
+            if not filter_query or all(item.get(k) == v for k, v in filter_query.items()):
+                item.update(set_vals)
+
+
 # MongoDB Database Setup
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
 print(f"Connecting to MongoDB: {MONGODB_URI}")
 
+inventory_col = None
 try:
-    client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
-    db = client["warehouse_db"]
-    inventory_col = db["inventory"]
+    client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=2000)
     # Trigger connection test
     client.server_info()
+    db = client["warehouse_db"]
+    inventory_col = db["inventory"]
+    print("Connected to MongoDB successfully.")
 except Exception as e:
-    print(f"WARNING: Could not connect to MongoDB server: {e}")
+    print(f"INFO: MongoDB not available ({e}). Using in-memory inventory database fallback.")
+    inventory_col = InMemoryInventoryCollection()
 
 def init_db():
     try:
@@ -199,7 +245,14 @@ def gen_frames():
 
 @app.get("/api/video_feed")
 def video_feed():
-    return StreamingResponse(gen_frames(), media_type="multipart/x-mixed-replace; boundary=frame")
+    return StreamingResponse(
+        gen_frames(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 
 # WebSocket Endpoint for Robot Agent
@@ -218,10 +271,11 @@ async def robot_websocket_endpoint(websocket: WebSocket):
         while True:
             msg = await websocket.receive_json()
             
-            # If msg is a perception frame, decode and set current_frame_bytes directly
+            # If msg is a perception frame, decode for MJPEG and broadcast directly via WebSocket
             if msg.get("type") == "frame":
                 try:
                     current_frame_bytes = base64.b64decode(msg["data"])
+                    broadcast_ws_message(msg)
                 except Exception as e:
                     print(f"Error decoding image: {e}")
             else:
@@ -279,6 +333,7 @@ async def robot_websocket_endpoint(websocket: WebSocket):
         broadcast_ws_message({"type": "log", "data": "[SYSTEM] Robot agent disconnected."})
         broadcast_ws_message({"type": "robot_status", "data": "disconnected"})
         broadcast_ws_message({"type": "status", "data": "idle"})
+        broadcast_ws_message({"type": "frame", "data": None})
 
 
 # WebSocket Endpoint for Browser Web Clients
@@ -291,6 +346,12 @@ async def browser_websocket_endpoint(websocket: WebSocket):
     global robot_websocket
     if robot_websocket is not None:
         await websocket.send_json({"type": "robot_status", "data": "connected"})
+        if current_frame_bytes is not None:
+            try:
+                b64 = base64.b64encode(current_frame_bytes).decode('utf-8')
+                await websocket.send_json({"type": "frame", "data": b64})
+            except Exception:
+                pass
     else:
         await websocket.send_json({"type": "robot_status", "data": "disconnected"})
 
@@ -312,4 +373,4 @@ app.mount("/", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "st
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

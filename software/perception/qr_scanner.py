@@ -62,6 +62,8 @@ class QRScanner:
     ) -> np.ndarray:
 
         for text, pts in detections:
+            if pts is None:
+                continue
             # Reshape points to a standard 2D array of (N, 2) to handle any OpenCV/ZBar formats
             try:
                 pts_flat = np.array(pts).reshape(-1, 2)

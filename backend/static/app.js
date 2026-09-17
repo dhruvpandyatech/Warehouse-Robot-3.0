@@ -1,3 +1,11 @@
+const OFFLINE_FRAME = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240" viewBox="0 0 320 240">' +
+    '<rect width="100%" height="100%" fill="#0a0e17"/>' +
+    '<text x="50%" y="45%" fill="#4a5568" font-family="sans-serif" font-size="16" font-weight="bold" text-anchor="middle">CAMERA STANDBY</text>' +
+    '<text x="50%" y="60%" fill="#2d3748" font-family="sans-serif" font-size="12" text-anchor="middle">Waiting for robot mission stream...</text>' +
+    '</svg>'
+);
+
 // Global variables
 let socket = null;
 let currentWsUrl = '';
@@ -55,8 +63,11 @@ function connectWebSocket() {
     currentWsUrl = targets.wsFeed;
     appendSystemLog(`[SYSTEM] Connecting to server WebSocket at ${targets.wsFeed}...`);
     
-    // Set video feed source dynamically
-    document.getElementById('videoFeed').src = targets.videoFeed;
+    // Set video feed standby placeholder (streamed over WebSocket in real time)
+    const videoEl = document.getElementById('videoFeed');
+    if (videoEl && (!videoEl.src || videoEl.src.includes('/api/video_feed') || videoEl.src === window.location.href)) {
+        videoEl.src = OFFLINE_FRAME;
+    }
     
     try {
         socket = new WebSocket(targets.wsFeed);
@@ -101,6 +112,16 @@ function connectWebSocket() {
 // Handle incoming messages
 function handleWsMessage(msg) {
     switch (msg.type) {
+        case 'frame':
+            const videoEl = document.getElementById('videoFeed');
+            if (videoEl) {
+                if (msg.data) {
+                    videoEl.src = 'data:image/jpeg;base64,' + msg.data;
+                } else {
+                    videoEl.src = OFFLINE_FRAME;
+                }
+            }
+            break;
         case 'status':
             updateMissionStatusUI(msg.data);
             break;
@@ -136,6 +157,11 @@ function updateRobotConnectionUI(status) {
         badge.innerText = 'ROBOT: DISCONNECTED';
         badge.className = 'indicator-badge status-disconnected';
         
+        const videoEl = document.getElementById('videoFeed');
+        if (videoEl) {
+            videoEl.src = OFFLINE_FRAME;
+        }
+
         // Disable Start button if no robot is connected
         updateMissionStatusUI('idle');
     }
